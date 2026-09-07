@@ -294,6 +294,34 @@ def test_late_sensitive_prompt_response_is_idempotent(server, method, value_key)
     assert response["result"] == {"status": "expired"}
 
 
+@pytest.mark.parametrize("kind", ["sudo", "secret"])
+def test_sensitive_prompt_cancel_requires_exact_request_and_runtime_session(server, kind):
+    owner_event = threading.Event()
+    other_event = threading.Event()
+    server._pending["owned"] = ("runtime-a", owner_event)
+    server._pending["other"] = ("runtime-b", other_event)
+
+    cross = server.handle_request({
+        "id": "cross", "method": f"{kind}.cancel",
+        "params": {"request_id": "owned", "session_id": "runtime-b"},
+    })
+    stale = server.handle_request({
+        "id": "stale", "method": f"{kind}.cancel",
+        "params": {"request_id": "stale", "session_id": "runtime-a"},
+    })
+    exact = server.handle_request({
+        "id": "exact", "method": f"{kind}.cancel",
+        "params": {"request_id": "owned", "session_id": "runtime-a"},
+    })
+
+    assert cross["error"]["code"] == 4009
+    assert stale["error"]["code"] == 4009
+    assert not other_event.is_set()
+    assert exact["result"] == {"status": "cancelled"}
+    assert owner_event.is_set()
+    assert server._answers["owned"] == ""
+
+
 def test_late_clarify_response_remains_protocol_error(server):
     response = server.handle_request(
         {

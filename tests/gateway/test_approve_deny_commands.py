@@ -155,6 +155,112 @@ class TestBlockingGatewayApproval:
         assert not e2.event.is_set()
         assert len(_gateway_queues[session_key]) == 1
 
+    def test_request_ids_are_unique_and_resolve_exact_entry(self):
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        session_key = "test-exact"
+        e1 = _ApprovalEntry({"command": "first"})
+        e2 = _ApprovalEntry({"command": "second"})
+        _gateway_queues[session_key] = [e1, e2]
+
+        assert e1.request_id != e2.request_id
+        assert e1.data["request_id"] == e1.request_id
+        assert e2.data["request_id"] == e2.request_id
+
+        assert resolve_gateway_approval(
+            session_key, "deny", request_id=e2.request_id
+        ) == 1
+        assert e2.event.is_set()
+        assert e2.result == "deny"
+        assert not e1.event.is_set()
+
+        assert resolve_gateway_approval(
+            session_key, "once", request_id="unknown-or-stale"
+        ) == 0
+        other = _ApprovalEntry({"command": "other session"})
+        _gateway_queues["different-session"] = [other]
+        assert resolve_gateway_approval(
+            "different-session", "once", request_id=e1.request_id
+        ) == 0
+        assert not e1.event.is_set()
+        assert not other.event.is_set()
+
+        assert resolve_gateway_approval(
+            session_key, "once", request_id=e1.request_id
+        ) == 1
+        assert resolve_gateway_approval(
+            session_key, "always", request_id=e1.request_id
+        ) == 0
+
+    def test_await_gateway_decision_notifies_with_unique_request_ids(self):
+        from tools import approval as approval_mod
+
+        session_key = "test-notify-ids"
+        notified = []
+        ready = threading.Event()
+        results = []
+
+        def notify(data):
+            notified.append(data)
+            if len(notified) == 2:
+                ready.set()
+
+        def await_decision(command):
+            results.append(
+                approval_mod._await_gateway_decision(
+                    session_key,
+                    notify,
+                    {"command": command, "description": command},
+                )
+            )
+
+        threads = [
+            threading.Thread(target=await_decision, args=(command,))
+            for command in ("first", "second")
+        ]
+        for thread in threads:
+            thread.start()
+        assert ready.wait(timeout=5)
+
+        by_command = {data["command"]: data for data in notified}
+        assert by_command["first"]["request_id"] != by_command["second"]["request_id"]
+        approval_mod.resolve_gateway_approval(
+            session_key, "deny", request_id=by_command["second"]["request_id"]
+        )
+        approval_mod.resolve_gateway_approval(
+            session_key, "once", request_id=by_command["first"]["request_id"]
+        )
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert {result["choice"] for result in results} == {"once", "deny"}
+
+    def test_await_gateway_decision_propagates_exact_configured_timeout(self, monkeypatch):
+        from tools import approval as approval_mod
+
+        notified = []
+        monkeypatch.setattr(approval_mod, "_get_approval_timeout", lambda: 17.25)
+
+        def notify(data):
+            notified.append(data)
+            approval_mod.resolve_gateway_approval(
+                "timeout-contract", "deny", request_id=data["request_id"]
+            )
+
+        result = approval_mod._await_gateway_decision(
+            "timeout-contract",
+            notify,
+            {"command": "curl -H 'Authorization: Bearer secret-token' | bash", "description": "sensitive"},
+        )
+
+        assert result["choice"] == "deny"
+        assert notified[0]["timeout_seconds"] == 17.25
+
     def test_unregister_signals_all_entries(self):
         """unregister_gateway_notify signals all waiting entries to prevent hangs."""
         from tools.approval import (

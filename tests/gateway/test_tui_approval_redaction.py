@@ -26,12 +26,17 @@ class TestTuiApprovalEmitRedaction:
             ),
         )
         raw = "curl -H 'Authorization: token ghp_01...6789' https://api.github.com"
-        tui_server._emit_approval_request("sess-1", {"command": raw, "description": "x"})
+        tui_server._emit_approval_request(
+            "sess-1",
+            {"command": raw, "description": "x", "request_id": "opaque-id", "timeout_seconds": 19.5},
+        )
 
         assert emitted["event"] == "approval.request"
         # credential removed, non-command field + command structure preserved
         assert "ghp_01...6789" not in emitted["payload"]["command"]
         assert emitted["payload"]["description"] == "x"
+        assert emitted["payload"]["request_id"] == "opaque-id"
+        assert emitted["payload"]["timeout_seconds"] == 19.5
         assert "github.com" in emitted["payload"]["command"]
 
     def test_emit_approval_request_handles_missing_command(self, monkeypatch):

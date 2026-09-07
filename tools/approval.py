@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 from typing import Optional
 from hermes_cli.config import cfg_get
 
@@ -2029,11 +2030,13 @@ _permanent_approved: set = set()
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason")
+    __slots__ = ("request_id", "event", "data", "result", "reason")
 
     def __init__(self, data: dict):
+        self.request_id = uuid.uuid4().hex
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        self.data = dict(data)    # command, description, pattern_keys, …
+        self.data["request_id"] = self.request_id
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         # Optional free-text reason supplied with an explicit deny
         # (``/deny <reason>``) so the agent can adapt instead of only
@@ -2072,13 +2075,15 @@ def unregister_gateway_notify(session_key: str) -> None:
 
 def resolve_gateway_approval(session_key: str, choice: str,
                              resolve_all: bool = False,
-                             reason: Optional[str] = None) -> int:
+                             reason: Optional[str] = None,
+                             request_id: Optional[str] = None) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
-    When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    When *request_id* is provided, only that exact pending approval in the
+    session is resolved. Unknown, stale, expired, or cross-session IDs are a
+    no-op. Otherwise, *resolve_all* preserves ``/approve all`` behavior and
+    the default resolves only the oldest approval (FIFO).
 
     *reason* is an optional free-text explanation attached to an explicit
     deny (``/deny <reason>``).  It is relayed back to the agent in the
@@ -2090,7 +2095,16 @@ def resolve_gateway_approval(session_key: str, choice: str,
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
-        if resolve_all:
+        if request_id is not None:
+            target = next(
+                (entry for entry in queue if entry.request_id == request_id),
+                None,
+            )
+            if target is None:
+                return 0
+            queue.remove(target)
+            targets = [target]
+        elif resolve_all:
             targets = list(queue)
             queue.clear()
         else:
@@ -3082,6 +3096,12 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     primary_key = approval_data.get("pattern_key", "")
     all_keys = approval_data.get("pattern_keys", [primary_key])
 
+    # Resolve once and publish the exact relative lifetime that this wait uses.
+    # Clients can schedule their own expiry UI without learning command data or
+    # racing a second config read after the request has already been emitted.
+    timeout = _get_approval_timeout()
+    approval_data = dict(approval_data)
+    approval_data["timeout_seconds"] = timeout
     entry = _ApprovalEntry(approval_data)
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
@@ -3108,7 +3128,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
     # Notify the user (bridges sync agent thread → async gateway)
     try:
-        notify_cb(approval_data)
+        notify_cb(entry.data)
     except Exception as exc:
         logger.warning("Gateway approval notify failed: %s", exc)
         _drop_entry()
@@ -3119,8 +3139,6 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # every ~10s to the agent's inactivity tracker — otherwise the gateway
     # watchdog kills the agent while the user is still responding. Mirrors
     # _wait_for_process() cadence.
-    timeout = _get_approval_timeout()
-
     try:
         from tools.environments.base import touch_activity_if_due
     except Exception:  # pragma: no cover

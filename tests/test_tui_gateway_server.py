@@ -7,7 +7,7 @@ import time
 import types
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -15,6 +15,62 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
+
+
+def test_approval_respond_forwards_request_id(monkeypatch):
+    import tools.approval as approval
+
+    sid = "approval-sid"
+    server._sessions[sid] = {"session_key": "approval-session", "agent": object()}
+    resolve = Mock(return_value=1)
+    monkeypatch.setattr(approval, "resolve_gateway_approval", resolve)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args: None)
+    try:
+        response = server._methods["approval.respond"](
+            "rpc-id",
+            {"session_id": sid, "choice": "once", "request_id": "opaque-id"},
+        )
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert response["result"]["resolved"] == 1
+    resolve.assert_called_once_with(
+        "approval-session",
+        "once",
+        resolve_all=False,
+        request_id="opaque-id",
+    )
+
+
+def test_approval_cancel_denies_only_exact_runtime_session_request(monkeypatch):
+    import tools.approval as approval
+
+    server._sessions["runtime-a"] = {"session_key": "approval-a", "agent": object()}
+    server._sessions["runtime-b"] = {"session_key": "approval-b", "agent": object()}
+    resolve = Mock(
+        side_effect=lambda session, _choice, request_id=None: int(
+            session == "approval-a" and request_id == "owned"
+        )
+    )
+    monkeypatch.setattr(approval, "resolve_gateway_approval", resolve)
+    try:
+        cross = server._methods["approval.cancel"](
+            "cross", {"session_id": "runtime-b", "request_id": "owned"}
+        )
+        exact = server._methods["approval.cancel"](
+            "exact", {"session_id": "runtime-a", "request_id": "owned"}
+        )
+    finally:
+        server._sessions.pop("runtime-a", None)
+        server._sessions.pop("runtime-b", None)
+
+    assert cross["error"]["code"] == 4009
+    assert exact["result"] == {"status": "cancelled"}
+    assert resolve.call_args_list == [
+        call("approval-b", "deny", request_id="owned"),
+        call("approval-a", "deny", request_id="owned"),
+    ]
 
 
 @pytest.fixture(autouse=True)
