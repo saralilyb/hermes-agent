@@ -17,6 +17,32 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
 
 
+def test_approval_respond_forwards_request_id(monkeypatch):
+    import tools.approval as approval
+
+    sid = "approval-sid"
+    server._sessions[sid] = {"session_key": "approval-session", "agent": object()}
+    resolve = Mock(return_value=1)
+    monkeypatch.setattr(approval, "resolve_gateway_approval", resolve)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args: None)
+    try:
+        response = server._methods["approval.respond"](
+            "rpc-id",
+            {"session_id": sid, "choice": "once", "request_id": "opaque-id"},
+        )
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert response["result"]["resolved"] == 1
+    resolve.assert_called_once_with(
+        "approval-session",
+        "once",
+        resolve_all=False,
+        request_id="opaque-id",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _neuter_agent_prewarm_timer(request, monkeypatch):
     """Stub the deferred agent pre-warm timer for every test in this module.
