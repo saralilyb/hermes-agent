@@ -11483,6 +11483,22 @@ def _respond(rid, params, key, *, allow_expired=False):
     return _ok(rid, {"status": "ok"})
 
 
+def _cancel_sensitive_prompt(rid, params, key):
+    """Cancel one exact sudo/secret prompt owned by one runtime session."""
+    request_id = params.get("request_id", "")
+    session_id = params.get("session_id", "")
+    if not request_id or not session_id:
+        return _err(rid, 4002, "request_id and session_id required")
+    with _prompt_lock:
+        entry = _pending.get(request_id)
+        if not entry or entry[0] != session_id:
+            return _err(rid, 4009, f"no pending {key} request for session")
+    response = _respond(rid, {**params, key: ""}, key)
+    if "result" in response:
+        response["result"]["status"] = "cancelled"
+    return response
+
+
 @method("clarify.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "answer")
@@ -11504,6 +11520,16 @@ def _(rid, params: dict) -> dict:
     return _respond(rid, params, "value", allow_expired=True)
 
 
+@method("sudo.cancel")
+def _(rid, params: dict) -> dict:
+    return _cancel_sensitive_prompt(rid, params, "password")
+
+
+@method("secret.cancel")
+def _(rid, params: dict) -> dict:
+    return _cancel_sensitive_prompt(rid, params, "value")
+
+
 @method("approval.respond")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
@@ -11523,6 +11549,27 @@ def _(rid, params: dict) -> dict:
                 )
             },
         )
+    except Exception as e:
+        return _err(rid, 5004, str(e))
+
+
+@method("approval.cancel")
+def _(rid, params: dict) -> dict:
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    request_id = params.get("request_id", "")
+    if not request_id:
+        return _err(rid, 4002, "request_id required")
+    try:
+        from tools.approval import resolve_gateway_approval
+
+        resolved = resolve_gateway_approval(
+            session["session_key"], "deny", request_id=request_id
+        )
+        if not resolved:
+            return _err(rid, 4009, "no pending approval request for session")
+        return _ok(rid, {"status": "cancelled"})
     except Exception as e:
         return _err(rid, 5004, str(e))
 

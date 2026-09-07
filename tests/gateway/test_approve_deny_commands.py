@@ -240,6 +240,27 @@ class TestBlockingGatewayApproval:
         assert not any(thread.is_alive() for thread in threads)
         assert {result["choice"] for result in results} == {"once", "deny"}
 
+    def test_await_gateway_decision_propagates_exact_configured_timeout(self, monkeypatch):
+        from tools import approval as approval_mod
+
+        notified = []
+        monkeypatch.setattr(approval_mod, "_get_approval_timeout", lambda: 17.25)
+
+        def notify(data):
+            notified.append(data)
+            approval_mod.resolve_gateway_approval(
+                "timeout-contract", "deny", request_id=data["request_id"]
+            )
+
+        result = approval_mod._await_gateway_decision(
+            "timeout-contract",
+            notify,
+            {"command": "curl -H 'Authorization: Bearer secret-token' | bash", "description": "sensitive"},
+        )
+
+        assert result["choice"] == "deny"
+        assert notified[0]["timeout_seconds"] == 17.25
+
     def test_unregister_signals_all_entries(self):
         """unregister_gateway_notify signals all waiting entries to prevent hangs."""
         from tools.approval import (

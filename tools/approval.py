@@ -3096,6 +3096,12 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     primary_key = approval_data.get("pattern_key", "")
     all_keys = approval_data.get("pattern_keys", [primary_key])
 
+    # Resolve once and publish the exact relative lifetime that this wait uses.
+    # Clients can schedule their own expiry UI without learning command data or
+    # racing a second config read after the request has already been emitted.
+    timeout = _get_approval_timeout()
+    approval_data = dict(approval_data)
+    approval_data["timeout_seconds"] = timeout
     entry = _ApprovalEntry(approval_data)
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
@@ -3133,8 +3139,6 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # every ~10s to the agent's inactivity tracker — otherwise the gateway
     # watchdog kills the agent while the user is still responding. Mirrors
     # _wait_for_process() cadence.
-    timeout = _get_approval_timeout()
-
     try:
         from tools.environments.base import touch_activity_if_due
     except Exception:  # pragma: no cover
